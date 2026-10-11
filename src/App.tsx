@@ -1,0 +1,1164 @@
+import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+import {
+  Activity, AlertTriangle, BarChart3, Bell, CheckCircle2,
+  ClipboardList, CloudRain, LayoutDashboard, MapPinned,
+  Menu, Plus, Search, ShieldCheck, Truck, Users, Waves, X,
+  Download, ExternalLink, FileText,
+} from "lucide-react";
+import "./App.css";
+
+type Portal = "victim" | "officer";
+type Risk = "Low" | "Moderate" | "High" | "Critical";
+type Status = "Submitted" | "Under Review" | "Rescue Assigned" | "Resolved";
+
+type Emergency = {
+  id: string;
+  name: string;
+  mobile: string;
+  district: string;
+  locality: string;
+  type: string;
+  people: number;
+  address: string;
+  water: string;
+  injuries: string;
+  vulnerable: number;
+  road: string;
+  immediateDanger: string;
+  details: string;
+  score: number;
+  risk: Risk;
+  status: Status;
+  assignedTeam: string;
+};
+
+const API_URL = "http://localhost:8080/api";
+const STORAGE_KEY = "floodresq_shared_demo_reports_v1";
+
+const navigation = [
+  { name: "Dashboard", icon: LayoutDashboard },
+  { name: "Emergency Requests", icon: ClipboardList },
+  { name: "Priority Queue", icon: AlertTriangle },
+  { name: "Risk Assessment", icon: Activity },
+  { name: "Incident Map", icon: MapPinned },
+  { name: "Affected People", icon: Users },
+  { name: "Rescue Operations", icon: Truck },
+  { name: "Weather & Rainfall", icon: CloudRain },
+  { name: "Analytics & Reports", icon: BarChart3 },
+];
+
+const districts = [
+  "Adilabad", "Bhadradri Kothagudem", "Hanumakonda", "Hyderabad",
+  "Jagtial", "Jangaon", "Jayashankar Bhupalpally", "Jogulamba Gadwal",
+  "Kamareddy", "Karimnagar", "Khammam", "Komaram Bheem Asifabad",
+  "Mahabubabad", "Mahabubnagar", "Mancherial", "Medak",
+  "Medchal-Malkajgiri", "Mulugu", "Nagarkurnool", "Nalgonda",
+  "Narayanpet", "Nirmal", "Nizamabad", "Peddapalli",
+  "Rajanna Sircilla", "Rangareddy", "Sangareddy", "Siddipet",
+  "Suryapet", "Vikarabad", "Wanaparthy", "Warangal",
+  "Yadadri Bhuvanagiri",
+];
+
+const emergencyTypes = [
+  "People trapped", "Water entering home", "Rising water",
+  "Medical emergency", "Road blocked", "Evacuation",
+  "Food or drinking water", "Other",
+];
+
+const rescueTeams = [
+  "Team Alpha", "Team Bravo", "Team Charlie",
+  "Medical Team 1", "Boat Rescue Team 1",
+];
+
+function calculateRisk(data: {
+  water: string;
+  injuries: string;
+  vulnerable: number;
+  road: string;
+  immediateDanger: string;
+  people: number;
+  type: string;
+}) {
+  let score = 10;
+
+  if (data.water === "Ankle deep") score += 5;
+  if (data.water === "Knee deep") score += 15;
+  if (data.water === "Waist deep") score += 25;
+  if (data.water === "Above head") score += 40;
+  if (data.water === "Water entering home") score += 25;
+  if (data.water === "Unknown") score += 10;
+  if (data.injuries === "Yes") score += 20;
+  if (data.injuries === "Unknown") score += 10;
+  if (data.vulnerable > 0) score += 10;
+  if (data.road === "Flooded") score += 10;
+  if (data.road === "Blocked") score += 15;
+  if (data.road === "Unknown") score += 5;
+  if (data.immediateDanger === "Yes") score += 25;
+  if (data.immediateDanger === "Unknown") score += 10;
+  if (data.people >= 6) score += 5;
+  if (data.people >= 15) score += 5;
+  if (data.type === "People trapped") score += 15;
+  if (data.type === "Medical emergency") score += 15;
+
+  score = Math.min(score, 100);
+
+  const risk: Risk =
+    score >= 75 ? "Critical" :
+    score >= 50 ? "High" :
+    score >= 25 ? "Moderate" : "Low";
+
+  return { score, risk };
+}
+
+function mapBackendReport(item: any): Emergency {
+  const water = String(item.waterLevel ?? "Unknown");
+  const injuries = String(item.injuries ?? "Unknown");
+  const vulnerable = Number(item.vulnerablePeople ?? 0);
+  const road = String(item.roadCondition ?? "Unknown");
+  const immediateDanger = String(item.immediateDanger ?? "Unknown");
+  const people = Number(item.peopleAffected ?? 1);
+  const type = String(item.emergencyType ?? "Other");
+
+  const assessment = calculateRisk({
+    water, injuries, vulnerable, road, immediateDanger, people, type,
+  });
+
+  const rawRisk = String(item.riskLevel ?? assessment.risk).toUpperCase();
+  const risk: Risk =
+    rawRisk === "CRITICAL" ? "Critical" :
+    rawRisk === "HIGH" ? "High" :
+    rawRisk === "MODERATE" ? "Moderate" :
+    rawRisk === "LOW" ? "Low" : assessment.risk;
+
+  const rawStatus = String(item.status ?? "SUBMITTED")
+    .toUpperCase().replace(/[\s-]+/g, "_");
+
+  const status: Status =
+    rawStatus === "RESOLVED" ? "Resolved" :
+    rawStatus === "RESCUE_ASSIGNED" ? "Rescue Assigned" :
+    rawStatus === "UNDER_REVIEW" ? "Under Review" : "Submitted";
+
+  return {
+    id: String(item.id ?? ""),
+    name: String(item.victimName ?? item.name ?? ""),
+    mobile: String(item.phone ?? item.mobile ?? ""),
+    district: String(item.district ?? ""),
+    locality: String(item.location ?? item.locality ?? ""),
+    type,
+    people,
+    address: String(item.address ?? ""),
+    water,
+    injuries,
+    vulnerable,
+    road,
+    immediateDanger,
+    details: String(item.description ?? item.details ?? ""),
+    score: Number(item.riskScore ?? assessment.score),
+    risk,
+    status,
+    assignedTeam: String(item.assignedTeam ?? ""),
+  };
+}
+
+function readDemoReports(): Emergency[] {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (!saved) return [];
+    const parsed = JSON.parse(saved);
+    return Array.isArray(parsed) ? parsed.map(mapBackendReport) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveDemoReports(reports: Emergency[]) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(reports));
+  } catch (error) {
+    console.error("Could not save demo reports locally:", error);
+  }
+}
+
+function App() {
+  const [portal, setPortal] = useState<Portal>("victim");
+  const [showAuth, setShowAuth] = useState(true);
+  const [authMode, setAuthMode] = useState<"login" | "signup">("login");
+  const [page, setPage] = useState("Dashboard");
+  const [search, setSearch] = useState("");
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [requests, setRequests] = useState<Emergency[]>(() => readDemoReports());
+  const [submittedId, setSubmittedId] = useState("");
+  const [notice, setNotice] = useState("");
+  const [fullName, setFullName] = useState("");
+  const [demoMode, setDemoMode] = useState(false);
+
+  useEffect(() => {
+    saveDemoReports(requests);
+  }, [requests]);
+
+  useEffect(() => {
+    if (showAuth || portal !== "officer" ) return;
+
+    let cancelled = false;
+
+    async function loadReports() {
+      try {
+        const response = await fetch(`${API_URL}/emergency-reports`, {
+          credentials: "include",
+        });
+
+        if (!response.ok) {
+          throw new Error(`Reports API returned HTTP ${response.status}`);
+        }
+
+        const data = await response.json();
+        if (!Array.isArray(data)) {
+          throw new Error("Reports API did not return an array.");
+        }
+
+        if (!cancelled) {
+          const backendReports = data.map(mapBackendReport);
+          setRequests(previous => {
+            const merged = new Map<string, Emergency>();
+            previous.forEach(report => merged.set(report.id, report));
+            backendReports.forEach(report => merged.set(report.id, report));
+            return Array.from(merged.values());
+          });
+          setNotice(`Loaded ${data.length} report(s) from the backend.`);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          console.error("Loading reports failed:", error);
+          setNotice("Backend reports could not be loaded. Locally saved demo reports remain available.");
+        }
+      }
+    }
+
+    void loadReports();
+    return () => { cancelled = true; };
+  }, [showAuth, portal]);
+
+  function openDemo(role: Portal, displayName: string, destination = "Dashboard") {
+    setDemoMode(true);
+    setPortal(role);
+    setFullName(displayName);
+    setPage(destination);
+    setSearch("");
+    setNotice("Demo mode active. Reports are shared between portals in this browser.");
+    setSubmittedId("");
+    setShowAuth(false);
+  }
+
+  async function signOut() {
+    if (!demoMode) {
+      try {
+        await fetch(`${API_URL}/auth/logout`, {
+          method: "POST",
+          credentials: "include",
+        });
+      } catch {
+        // Signing out locally still works if the backend is unavailable.
+      }
+    }
+
+    setShowAuth(true);
+    setAuthMode("login");
+    setPortal("victim");
+    setFullName("");
+    setSubmittedId("");
+    setNotice("");
+    setDemoMode(false);
+    setPage("Dashboard");
+  }
+
+  async function handleAuth(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    const form = new FormData(event.currentTarget);
+    const name = String(form.get("fullName") || "").trim();
+    const email = String(form.get("email") || "").trim();
+    const password = String(form.get("password") || "");
+
+    try {
+      const response = await fetch(
+        `${API_URL}/auth/${authMode === "signup" ? "register" : "login"}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify(
+            authMode === "signup"
+              ? { fullName: name, email, password }
+              : { email, password }
+          ),
+        }
+      );
+
+      const result = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        alert(result.message || `Authentication failed (HTTP ${response.status}).`);
+        return;
+      }
+
+      if (authMode === "signup") {
+        alert("Victim account created. Please sign in.");
+        setAuthMode("login");
+        return;
+      }
+
+      if (result.role !== "VICTIM" && result.role !== "OFFICER") {
+        alert("This account does not have a valid portal role.");
+        return;
+      }
+
+      setDemoMode(false);
+      setPortal(result.role === "OFFICER" ? "officer" : "victim");
+      setFullName(String(result.fullName || email));
+      setPage("Dashboard");
+      setSearch("");
+      setNotice("");
+      setShowAuth(false);
+    } catch (error) {
+      console.error("Authentication failed:", error);
+      alert("Backend connection failed. Use a Demo button to continue without backend login.");
+    }
+  }
+
+  async function submitRequest(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
+
+    const data = {
+      water: String(form.get("water") || "Unknown"),
+      injuries: String(form.get("injuries") || "Unknown"),
+      vulnerable: Number(form.get("vulnerable") || 0),
+      road: String(form.get("road") || "Unknown"),
+      immediateDanger: String(form.get("immediateDanger") || "Unknown"),
+      people: Number(form.get("people") || 1),
+      type: String(form.get("type") || "Other"),
+    };
+
+    const assessment = calculateRisk(data);
+    const request: Emergency = {
+      id: `DEMO-${Date.now()}`,
+      name: String(form.get("name") || ""),
+      mobile: String(form.get("mobile") || ""),
+      district: String(form.get("district") || ""),
+      locality: String(form.get("locality") || ""),
+      type: data.type,
+      people: data.people,
+      address: String(form.get("address") || ""),
+      water: data.water,
+      injuries: data.injuries,
+      vulnerable: data.vulnerable,
+      road: data.road,
+      immediateDanger: data.immediateDanger,
+      details: String(form.get("details") || ""),
+      score: assessment.score,
+      risk: assessment.risk,
+      status: "Submitted",
+      assignedTeam: "",
+    };
+
+    if (demoMode) {
+      setRequests(previous => [request, ...previous]);
+      setSubmittedId(request.id);
+      setNotice("Demo report saved. Open Officer Demo to review it.");
+      formElement.reset();
+      return;
+    }
+
+    const payload = {
+      victimName: request.name,
+      phone: request.mobile,
+      district: request.district,
+      location: request.locality,
+      address: request.address,
+      description: request.details,
+      emergencyType: request.type,
+      peopleAffected: request.people,
+      waterLevel: request.water,
+      injuries: request.injuries,
+      vulnerablePeople: request.vulnerable,
+      roadCondition: request.road,
+      immediateDanger: request.immediateDanger,
+    };
+
+    try {
+      const response = await fetch(`${API_URL}/emergency-reports`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify(payload),
+      });
+
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        alert(result.message || `Report submission failed (HTTP ${response.status}).`);
+        return;
+      }
+
+      const savedRequest = mapBackendReport(result);
+      if (!savedRequest.id) {
+        alert("The backend did not return a report ID. The report save could not be confirmed.");
+        return;
+      }
+
+      setRequests(previous => [
+        savedRequest,
+        ...previous.filter(item => item.id !== savedRequest.id),
+      ]);
+      setSubmittedId(savedRequest.id);
+      setNotice("Emergency report saved successfully.");
+      formElement.reset();
+    } catch (error) {
+      console.error("Report submission failed:", error);
+      alert("Could not connect to the backend. Use Victim Demo to test offline report sharing.");
+    }
+  }
+
+  function updateRequest(id: string, changes: Partial<Emergency>) {
+    setRequests(previous => previous.map(request =>
+      request.id === id ? { ...request, ...changes } : request
+    ));
+    setNotice(`Request ${id} updated in the shared browser store.`);
+  }
+
+  const visibleRequests = requests.filter(request =>
+    `${request.id} ${request.name} ${request.district} ${request.locality} ${request.type} ${request.status}`
+      .toLowerCase()
+      .includes(search.toLowerCase())
+  );
+
+  function exportCSV() {
+    const headers = [
+      "Request ID", "Name", "District", "Locality", "Emergency Type",
+      "People", "Risk Score", "Risk Level", "Status", "Assigned Team",
+    ];
+
+    const rows = visibleRequests.map(request => [
+      request.id, request.name, request.district, request.locality,
+      request.type, request.people, request.score, request.risk,
+      request.status, request.assignedTeam,
+    ]);
+
+    const csv = [headers, ...rows]
+      .map(row => row.map(value =>
+        `"${String(value).replace(/"/g, '""')}"`
+      ).join(","))
+      .join("\n");
+
+    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8;" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "floodresq-reports.csv";
+    link.click();
+    URL.revokeObjectURL(url);
+  }
+
+  const criticalCount = requests.filter(r => r.risk === "Critical").length;
+  const highCount = requests.filter(r => r.risk === "High").length;
+  const totalPeople = requests.reduce((sum, r) => sum + r.people, 0);
+  const assignedCount = requests.filter(r => r.assignedTeam !== "").length;
+
+  if (showAuth) {
+    return (
+      <main className="victim-screen">
+        <header className="victim-header">
+          <div className="brand">
+            <span className="brand-mark"><Waves /></span>
+            <span>FloodResQ <span className="brand-light">Telangana</span></span>
+          </div>
+        </header>
+
+        <section className="victim-hero">
+          <span className="eyebrow"><ShieldCheck size={15} /> TELANGANA FLOOD RESPONSE</span>
+          <h1>Welcome to<br /><span>FloodResQ.</span></h1>
+<p>Sign in to open your Victim or Officer portal.</p>        </section>
+
+        <section className="victim-form-card">
+          <div className="section-heading">
+            <div>
+              <h2>{authMode === "login" ? "Welcome back" : "Create your account"}</h2>
+              <p>{authMode === "login" ? "Your account role determines which portal opens." : "Public registration creates a Victim account only."}</p>
+            </div>
+          </div>
+
+          <form className="auth-form" onSubmit={handleAuth}>
+            {authMode === "signup" && (
+              <label>Full name *
+                <input name="fullName" required placeholder="Enter your full name" />
+              </label>
+            )}
+            <label>Email address *
+              <input name="email" type="email" required placeholder="you@example.com" />
+            </label>
+            <label>Password *
+              <input name="password" type="password" minLength={6} required placeholder="Enter your password" />
+            </label>
+            <button className="primary-btn submit-btn" type="submit">
+              {authMode === "login" ? "Sign In →" : "Create Victim Account →"}
+            </button>
+            <p className="privacy-note">Academic prototype. Do not enter real passwords or sensitive personal information.</p>
+          </form>
+
+          <div className="table-footer">
+            {authMode === "login" ? "New to FloodResQ? " : "Already registered? "}
+            <button className="outline-btn" type="button" onClick={() => setAuthMode(authMode === "login" ? "signup" : "login")}>
+              {authMode === "login" ? "Sign Up" : "Sign In"}
+            </button>
+          </div>
+
+          
+        </section>
+
+        <footer className="victim-footer">FloodResQ Telangana · Academic prototype</footer>
+      </main>
+    );
+  }
+    if (portal === "victim") {
+    return (
+      <main className="victim-screen">
+        <header className="victim-header">
+          <div className="brand">
+            <span className="brand-mark"><Waves /></span>
+            <span>FloodResQ <span className="brand-light">Telangana</span></span>
+          </div>
+          <button className="outline-btn" onClick={signOut}>Sign Out</button>
+        </header>
+
+        <section className="victim-hero">
+          <span className="eyebrow"><ShieldCheck size={15} /> VICTIM EMERGENCY PORTAL</span>
+          <h1>Request <span>Help.</span></h1>
+          <p>Submit emergency details for preliminary risk assessment.</p>
+          {fullName && <p>Signed in as: {fullName}</p>}
+          {demoMode && <p>Demo mode: reports are saved in this browser.</p>}
+        </section>
+
+        <section className="victim-form-card">
+          <div className="section-heading">
+            <div>
+              <h2>Emergency Report</h2>
+              <p>Complete the form below. Required fields are marked *.</p>
+            </div>
+          </div>
+
+          {submittedId && (
+            <div className="action-notice">
+              <CheckCircle2 size={18} />
+              Report saved successfully. Reference ID: {submittedId}
+            </div>
+          )}
+
+          {notice && <div className="action-notice">{notice}</div>}
+
+          <form className="auth-form" onSubmit={submitRequest}>
+            <label>Full name *
+              <input name="name" required defaultValue={fullName} placeholder="Your full name" />
+            </label>
+
+            <label>Mobile number *
+              <input name="mobile" type="tel" pattern="[0-9]{10}" required placeholder="10-digit number" />
+            </label>
+
+            <label>District *
+              <select name="district" required defaultValue="">
+                <option value="" disabled>Select district</option>
+                {districts.map(d => <option key={d} value={d}>{d}</option>)}
+              </select>
+            </label>
+
+            <label>Locality / Village *
+              <input name="locality" required placeholder="Village or locality" />
+            </label>
+
+            <label>Full address *
+              <textarea name="address" required placeholder="House number, street, landmark" />
+            </label>
+
+            <label>Emergency type *
+              <select name="type" required defaultValue="">
+                <option value="" disabled>Select emergency type</option>
+                {emergencyTypes.map(t => <option key={t} value={t}>{t}</option>)}
+              </select>
+            </label>
+
+            <label>Total people affected *
+              <input name="people" type="number" min="1" required defaultValue="1" />
+            </label>
+
+            <label>People needing special assistance *
+              <input name="vulnerable" type="number" min="0" required defaultValue="0" />
+            </label>
+
+            <label>Water level *
+              <select name="water" required defaultValue="">
+                <option value="" disabled>Select water level</option>
+                {["Ankle deep", "Knee deep", "Waist deep", "Above head", "Water entering home", "Unknown"].map(v =>
+                  <option key={v} value={v}>{v}</option>
+                )}
+              </select>
+            </label>
+
+            <label>Any injuries? *
+              <select name="injuries" required defaultValue="">
+                <option value="" disabled>Select option</option>
+                <option>Yes</option>
+                <option>No</option>
+                <option>Unknown</option>
+              </select>
+            </label>
+
+            <label>Road condition *
+              <select name="road" required defaultValue="">
+                <option value="" disabled>Select road condition</option>
+                <option>Clear</option>
+                <option>Flooded</option>
+                <option>Blocked</option>
+                <option>Unknown</option>
+              </select>
+            </label>
+
+            <label>Immediate danger? *
+              <select name="immediateDanger" required defaultValue="">
+                <option value="" disabled>Select option</option>
+                <option>Yes</option>
+                <option>No</option>
+                <option>Unknown</option>
+              </select>
+            </label>
+
+            <label>Additional details
+              <textarea name="details" placeholder="Describe the situation or help needed" />
+            </label>
+
+            <button className="primary-btn submit-btn" type="submit">
+              <Plus size={17} /> Submit Emergency Report
+            </button>
+
+            <p className="privacy-note">
+              Demo submissions are saved in this browser. Normal submissions are sent to the Spring Boot backend.
+            </p>
+          </form>
+
+          <div className="table-footer">
+            <h3>Reports submitted in this browser</h3>
+            {requests.length === 0 ? <p>No reports submitted yet.</p> :
+              requests.map(r => (
+                <div className="operation-row" key={r.id}>
+                  <div className="operation-details">
+                    <b>{r.id}</b>
+                    <p>{r.locality}, {r.district} · {r.type}</p>
+                    <p>Status: {r.status}</p>
+                  </div>
+                  <RiskBadge risk={r.risk} score={r.score} />
+                </div>
+              ))
+            }
+          </div>
+        </section>
+        <footer className="victim-footer">FloodResQ Telangana · Academic prototype</footer>
+      </main>
+    );
+  }
+
+  return (
+    <div className="app-shell">
+      <aside className={`sidebar ${menuOpen ? "sidebar-open" : ""}`}>
+        <div className="brand sidebar-brand">
+          <span className="brand-mark"><Waves /></span>
+          <span>FloodResQ<span className="brand-light">.</span><small>TELANGANA RESPONSE</small></span>
+          <button className="mobile-close" onClick={() => setMenuOpen(false)}><X /></button>
+        </div>
+
+        <div className="workspace">
+          <span className="workspace-icon"><ShieldCheck size={18} /></span>
+          <span>
+            <b>{page === "Rescue Operations" && fullName.includes("Rescue Team") ? "Rescue Team Portal" : "Officer Portal"}</b>
+            <small>{fullName || "Response workspace"}</small>
+          </span>
+        </div>
+
+        <nav className="sidebar-nav">
+          <p className="nav-caption">OPERATIONS</p>
+          {navigation.map(item => {
+            const Icon = item.icon;
+            return (
+              <button
+                key={item.name}
+                className={`nav-item ${page === item.name ? "active" : ""}`}
+                onClick={() => {
+                  setPage(item.name);
+                  setMenuOpen(false);
+                  setNotice("");
+                }}
+              >
+                <Icon size={18} />
+                <span>{item.name}</span>
+              </button>
+            );
+          })}
+        </nav>
+
+        <div className="sidebar-bottom">
+          <div className="connection-dot" />
+          {demoMode ? "Shared demo reports" : "Backend reports"}
+        </div>
+
+        <button className="profile-card" onClick={signOut}>
+          <span className="avatar">OF</span>
+          <span><b>Sign Out</b><small>Return to login</small></span>
+          <span>→</span>
+        </button>
+      </aside>
+
+      {menuOpen && <button className="mobile-backdrop" onClick={() => setMenuOpen(false)} />}
+
+      <main className="main-panel">
+        <header className="topbar">
+          <button className="mobile-menu" onClick={() => setMenuOpen(true)}><Menu /></button>
+          <div className="breadcrumb">Telangana <span>/</span> <b>{page}</b></div>
+          <div className="topbar-actions">
+            <button className="icon-btn" aria-label="Notifications"><Bell size={19} /></button>
+            <button className="outline-btn" onClick={signOut}>Sign Out</button>
+          </div>
+        </header>
+
+        <div className="page-content">
+          <div className="page-heading">
+            <div>
+              <div className="eyebrow">EMERGENCY RESPONSE · TELANGANA</div>
+              <h1>{page}</h1>
+              <p>{pageDescription(page)}</p>
+            </div>
+            <button className="primary-btn" onClick={() => { setPage("Emergency Requests"); setSearch(""); }}>
+              <ClipboardList size={17} /> View requests
+            </button>
+          </div>
+
+          <div className="notice">
+            <span className="notice-icon"><ShieldCheck size={19} /></span>
+            <span>
+              <b>{demoMode ? "Demo mode" : "Academic prototype"}</b>
+              <small>
+                {demoMode
+                  ? "Demo reports are shared across the portals in this browser. No real rescue team is notified."
+                  : "Reports are loaded from the backend. Risk scores are preliminary and are not official flood warnings."}
+              </small>
+            </span>
+          </div>
+
+          {notice && (
+            <div className="action-notice">
+              <CheckCircle2 size={17} />
+              {notice}
+              <button className="icon-btn" onClick={() => setNotice("")} aria-label="Dismiss">
+                <X size={16} />
+              </button>
+            </div>
+          )}
+
+          {page !== "Dashboard" && page !== "Weather & Rainfall" && (
+            <div className="table-toolbar">
+              <div className="search-box">
+                <Search size={17} />
+                <input
+                  value={search}
+                  onChange={e => setSearch(e.target.value)}
+                  placeholder="Search ID, district, locality or type"
+                />
+              </div>
+              <button className="filter-btn" onClick={() => setSearch("")}>Clear search</button>
+            </div>
+          )}
+
+          {page === "Dashboard" && (
+            <>
+              <section className="metric-grid">
+                <Metric title="Submitted requests" value={String(requests.length)} note="Available reports" icon={<ClipboardList />} tone="blue" />
+                <Metric title="Critical risk" value={String(criticalCount)} note="Preliminary score" icon={<AlertTriangle />} tone="red" />
+                <Metric title="People reported" value={String(totalPeople)} note="Reported total" icon={<Users />} tone="purple" />
+                <Metric title="Assigned operations" value={String(assignedCount)} note="Assigned teams" icon={<Truck />} tone="green" />
+              </section>
+
+              <section className="content-grid">
+                <div className="panel incident-panel">
+                  <PanelHeader title="Recent emergency reports" subtitle="Latest available reports" />
+                  <RequestsTable requests={requests.slice(0, 5)} />
+                  <div className="table-footer">
+                    <button className="outline-btn" onClick={() => setPage("Emergency Requests")}>View all requests →</button>
+                  </div>
+                </div>
+                <RiskDistribution requests={requests} />
+              </section>
+
+              <section className="panel workflow-panel">
+                <div>
+                  <span className="workflow-icon"><MapPinned size={21} /></span>
+                  <div><h2>Incident overview</h2><p>Review reported locations and preliminary risk assessments.</p></div>
+                </div>
+                <button className="outline-btn" onClick={() => setPage("Incident Map")}>Open incident map →</button>
+              </section>
+            </>
+          )}
+                    {page === "Emergency Requests" && (
+            <section className="panel">
+              <PanelHeader title="All Emergency Requests" subtitle={`${visibleRequests.length} matching reports`} />
+              <RequestsTable
+                requests={visibleRequests}
+                showDetails
+                onStatusChange={(r, status) => updateRequest(r.id, { status })}
+              />
+              <div className="table-footer">Showing {visibleRequests.length} reports</div>
+            </section>
+          )}
+
+          {page === "Priority Queue" && (
+            <section className="panel">
+              <PanelHeader title="Priority Queue" subtitle="Highest preliminary risk score first" />
+              {[...visibleRequests].sort((a, b) => b.score - a.score).map((r, i) => (
+                <div className="operation-row" key={r.id}>
+                  <span className="workflow-icon">{i + 1}</span>
+                  <div className="operation-details">
+                    <b>{r.id} · {r.locality}, {r.district}</b>
+                    <p>{r.type} · {r.people} people · {r.status}</p>
+                  </div>
+                  <RiskBadge risk={r.risk} score={r.score} />
+                </div>
+              ))}
+              {visibleRequests.length === 0 && <EmptyState text="No reports in the priority queue yet." />}
+            </section>
+          )}
+
+          {page === "Risk Assessment" && (
+            <section className="panel">
+              <PanelHeader title="Risk Assessment" subtitle="Rule-based preliminary assessment, not an official flood warning" />
+              {visibleRequests.map(r => (
+                <div className="operation-row" key={r.id}>
+                  <div className="operation-details">
+                    <b>{r.id} · {r.locality}, {r.district}</b>
+                    <p>{r.type} · {r.people} people affected</p>
+                    <small>
+                      Water: {r.water} · Injuries: {r.injuries} · Road: {r.road} · Immediate danger: {r.immediateDanger}
+                    </small>
+                    <div className="assessment-factors">
+                      <span>People needing assistance: {r.vulnerable}</span>
+                      <span>Status: {r.status}</span>
+                    </div>
+                  </div>
+                  <RiskBadge risk={r.risk} score={r.score} />
+                </div>
+              ))}
+              {visibleRequests.length === 0 && <EmptyState text="No reports available for assessment." />}
+            </section>
+          )}
+
+          {page === "Incident Map" && (
+            <section className="panel">
+              <PanelHeader title="Incident Locations" subtitle="Open reported localities in OpenStreetMap" />
+              <div className="map-intro">
+                <MapPinned size={30} />
+                <div>
+                  <b>OpenStreetMap location search</b>
+                  <p>Search results are not verified GPS coordinates or confirmed safe routes.</p>
+                </div>
+              </div>
+              {visibleRequests.map(r => (
+                <div className="operation-row" key={r.id}>
+                  <div className="operation-details">
+                    <b>{r.locality}, {r.district}</b>
+                    <p>{r.id} · {r.type} · {r.people} people</p>
+                    <small>{r.address}</small>
+                  </div>
+                  <a
+                    className="outline-btn"
+                    href={`https://www.openstreetmap.org/search?query=${encodeURIComponent(`${r.locality}, ${r.district}, Telangana, India`)}`}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    View map <ExternalLink size={14} />
+                  </a>
+                </div>
+              ))}
+              {visibleRequests.length === 0 && <EmptyState text="Submit a report through Victim Demo to see its location here." />}
+            </section>
+          )}
+
+          {page === "Affected People" && (
+            <section className="panel">
+              <PanelHeader title="Affected People Overview" subtitle="Aggregate figures from submitted reports" />
+              <section className="metric-grid">
+                <Metric title="People affected" value={String(visibleRequests.reduce((s, r) => s + r.people, 0))} note="Matching reports" icon={<Users />} tone="blue" />
+                <Metric title="People needing assistance" value={String(visibleRequests.reduce((s, r) => s + r.vulnerable, 0))} note="Reported vulnerable people" icon={<ShieldCheck />} tone="purple" />
+                <Metric title="Reports with injuries" value={String(visibleRequests.filter(r => r.injuries === "Yes").length)} note="Reports, not individuals" icon={<Activity />} tone="red" />
+                <Metric title="Affected locations" value={String(new Set(visibleRequests.map(r => `${r.locality}, ${r.district}`)).size)} note="Distinct reported locations" icon={<MapPinned />} tone="green" />
+              </section>
+              <RequestsTable requests={visibleRequests} showDetails />
+              <div className="table-footer">Counts may include duplicate reports for the same people or location.</div>
+            </section>
+          )}
+
+          {page === "Rescue Operations" && (
+            <section className="panel">
+              <PanelHeader title="Rescue Operations" subtitle="Assign demo teams and update report statuses" />
+              <section className="metric-grid">
+                <Metric title="Total reports" value={String(requests.length)} note="Available reports" icon={<ClipboardList />} tone="blue" />
+                <Metric title="Assigned reports" value={String(assignedCount)} note="Team selected" icon={<Truck />} tone="green" />
+                <Metric title="Awaiting assignment" value={String(requests.filter(r => !r.assignedTeam && r.status !== "Resolved").length)} note="No team selected" icon={<Users />} tone="red" />
+                <Metric title="Resolved reports" value={String(requests.filter(r => r.status === "Resolved").length)} note="Marked resolved" icon={<CheckCircle2 />} tone="purple" />
+              </section>
+
+              {visibleRequests.map(r => (
+                <div className="operation-row operation-edit" key={r.id}>
+                  <div className="operation-details">
+                    <b>{r.id} · {r.locality}, {r.district}</b>
+                    <p>{r.type} · {r.people} people · <RiskBadge risk={r.risk} score={r.score} /></p>
+
+                    <label className="operation-control">
+                      Assign demo team
+                      <select
+                        value={r.assignedTeam}
+                        onChange={e => updateRequest(r.id, {
+                          assignedTeam: e.target.value,
+                          status: e.target.value
+                            ? "Rescue Assigned"
+                            : (r.status === "Rescue Assigned" ? "Under Review" : r.status),
+                        })}
+                      >
+                        <option value="">Unassigned</option>
+                        {rescueTeams.map(team => <option key={team} value={team}>{team}</option>)}
+                      </select>
+                    </label>
+
+                    <label className="operation-control">
+                      Request status
+                      <select
+                        value={r.status}
+                        onChange={e => updateRequest(r.id, { status: e.target.value as Status })}
+                      >
+                        {(["Submitted", "Under Review", "Rescue Assigned", "Resolved"] as Status[]).map(s =>
+                          <option key={s} value={s}>{s}</option>
+                        )}
+                      </select>
+                    </label>
+                  </div>
+                </div>
+              ))}
+
+              {visibleRequests.length === 0 && <EmptyState text="No requests available to assign." />}
+              <p className="privacy-note">
+                Demo assignments are saved in this browser only. No real rescue team is notified.
+              </p>
+            </section>
+          )}
+
+          {page === "Weather & Rainfall" && (
+            <section className="panel">
+              <PanelHeader title="Weather & Rainfall" subtitle="Live weather service is not configured" />
+              <div className="weather-panel">
+                <CloudRain size={42} />
+                <h2>Weather data not connected</h2>
+                <p>Live rainfall, river levels, forecasts and weather alerts require a configured weather source and backend API.</p>
+                <p>Invented rainfall values are not displayed as real observations.</p>
+              </div>
+              <div className="table-footer">Location focus: Telangana, India</div>
+            </section>
+          )}
+
+          {page === "Analytics & Reports" && (
+            <>
+              <section className="metric-grid">
+                <Metric title="Total reports" value={String(requests.length)} note="Available reports" icon={<ClipboardList />} tone="blue" />
+                <Metric title="Critical risk" value={String(criticalCount)} note="Preliminary assessment" icon={<AlertTriangle />} tone="red" />
+                <Metric title="High risk" value={String(highCount)} note="Preliminary assessment" icon={<Activity />} tone="purple" />
+                <Metric title="People affected" value={String(totalPeople)} note="Reported total" icon={<Users />} tone="green" />
+              </section>
+
+              <div className="content-grid">
+                <RiskDistribution requests={requests} />
+                <section className="panel">
+                  <PanelHeader title="Report Summary" subtitle="Available report figures" />
+                  <SummaryRow label="Submitted reports" value={requests.length} />
+                  <SummaryRow label="Reports under review" value={requests.filter(r => r.status === "Under Review").length} />
+                  <SummaryRow label="Reports with team assigned" value={assignedCount} />
+                  <SummaryRow label="Resolved reports" value={requests.filter(r => r.status === "Resolved").length} />
+                  <SummaryRow label="People needing assistance" value={requests.reduce((s, r) => s + r.vulnerable, 0)} />
+                </section>
+              </div>
+
+              <section className="panel export-panel">
+                <div>
+                  <FileText size={22} />
+                  <div><b>Export report data</b><p>Download currently matching reports as CSV.</p></div>
+                </div>
+                <button className="primary-btn" onClick={exportCSV}>
+                  <Download size={17} /> Export CSV
+                </button>
+              </section>
+            </>
+          )}
+
+          <footer className="page-footer">
+            FloodResQ Telangana · Academic prototype · {demoMode ? "Demo storage" : "Backend reports"}
+          </footer>
+        </div>
+      </main>
+    </div>
+  );
+}
+
+function pageDescription(page: string) {
+  const descriptions: Record<string, string> = {
+    "Dashboard": "Monitor submitted emergency reports and preliminary risk levels.",
+    "Emergency Requests": "Review and update submitted emergency requests.",
+    "Priority Queue": "Review requests ordered by preliminary risk score.",
+    "Risk Assessment": "Inspect preliminary risk indicators for each emergency.",
+    "Incident Map": "Explore reported localities using OpenStreetMap.",
+    "Affected People": "Review aggregate figures for affected people.",
+    "Rescue Operations": "Manage demo team assignments and request status.",
+    "Weather & Rainfall": "Weather integration status and data availability.",
+    "Analytics & Reports": "Review report statistics and export report data.",
+  };
+  return descriptions[page] ?? "FloodResQ Telangana emergency response system.";
+}
+
+function Metric({ title, value, note, icon, tone }: {
+  title: string;
+  value: string;
+  note: string;
+  icon: ReactNode;
+  tone: string;
+}) {
+  return (
+    <article className="metric-card">
+      <div className={`metric-icon ${tone}`}>{icon}</div>
+      <span className="metric-title">{title}</span>
+      <strong>{value}</strong>
+      <small>{note}</small>
+    </article>
+  );
+}
+
+function PanelHeader({ title, subtitle }: { title: string; subtitle: string }) {
+  return (
+    <div className="panel-header">
+      <div><h2>{title}</h2><p>{subtitle}</p></div>
+    </div>
+  );
+}
+
+function RiskBadge({ risk, score }: { risk: Risk; score: number }) {
+  return <span className={`risk-tag ${risk.toLowerCase()}`}>{risk} · {score}/100</span>;
+}
+
+function RequestsTable({ requests, showDetails = false, onStatusChange }: {
+  requests: Emergency[];
+  showDetails?: boolean;
+  onStatusChange?: (request: Emergency, status: Status) => void;
+}) {
+  return (
+    <div className="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>REQUEST</th>
+            <th>LOCATION</th>
+            <th>RISK</th>
+            <th>STATUS</th>
+            {showDetails && <th>DETAILS</th>}
+          </tr>
+        </thead>
+        <tbody>
+          {requests.map(r => (
+            <tr key={r.id}>
+              <td>
+                <b className="incident-id">{r.id}</b>
+                <small>{r.type} · {r.people} people</small>
+              </td>
+              <td>{r.locality}, {r.district}</td>
+              <td><RiskBadge risk={r.risk} score={r.score} /></td>
+              <td>
+                {onStatusChange ? (
+                  <select
+                    aria-label={`Status for ${r.id}`}
+                    value={r.status}
+                    onChange={e => onStatusChange(r, e.target.value as Status)}
+                  >
+                    {(["Submitted", "Under Review", "Rescue Assigned", "Resolved"] as Status[]).map(s =>
+                      <option key={s} value={s}>{s}</option>
+                    )}
+                  </select>
+                ) : <span className="status-text">{r.status}</span>}
+              </td>
+              {showDetails && (
+                <td>
+                  <details>
+                    <summary>View</summary>
+                    <p><b>Reporter:</b> {r.name}</p>
+                    <p><b>Contact:</b> {r.mobile}</p>
+                    <p><b>Address:</b> {r.address}</p>
+                    <p><b>Water:</b> {r.water}</p>
+                    <p><b>Injuries:</b> {r.injuries}</p>
+                    <p><b>Immediate danger:</b> {r.immediateDanger}</p>
+                    <p><b>Assistance needed:</b> {r.vulnerable}</p>
+                    <p><b>Additional details:</b> {r.details || "None provided"}</p>
+                  </details>
+                </td>
+              )}
+            </tr>
+          ))}
+          {requests.length === 0 && (
+            <tr>
+              <td colSpan={showDetails ? 5 : 4} className="empty-state">No reports found.</td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function RiskDistribution({ requests }: { requests: Emergency[] }) {
+  const risks: Risk[] = ["Critical", "High", "Moderate", "Low"];
+  const colors: Record<Risk, string> = {
+    Critical: "#E34B59",
+    High: "#EF8C45",
+    Moderate: "#E9B949",
+    Low: "#35A77A",
+  };
+
+  return (
+    <section className="panel risk-panel">
+      <PanelHeader title="Risk Distribution" subtitle="Based on submitted reports" />
+      {risks.map(risk => {
+        const count = requests.filter(r => r.risk === risk).length;
+        const percentage = requests.length ? count / requests.length * 100 : 0;
+
+        return (
+          <div className="distribution-row" key={risk}>
+            <div><span>{risk}</span><b>{count}</b></div>
+            <div className="distribution-track">
+              <span style={{ width: `${percentage}%`, background: colors[risk] }} />
+            </div>
+          </div>
+        );
+      })}
+      <div className="risk-footnote">
+        <Activity size={15} /> Preliminary scores, not official flood warnings.
+      </div>
+    </section>
+  );
+}
+
+function SummaryRow({ label, value }: { label: string; value: number }) {
+  return <div className="summary-row"><span>{label}</span><b>{value}</b></div>;
+}
+
+function EmptyState({ text }: { text: string }) {
+  return <div className="empty-state empty-block">{text}</div>;
+}
+
+export default App;
